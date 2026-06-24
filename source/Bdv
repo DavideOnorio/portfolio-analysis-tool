@@ -22,3 +22,182 @@ df = pd.DataFrame({
 })
 
 print(rank_by_priority(df))
+
+
+"""
+cycle_backtester.py
+
+Compact walk-forward backtester for a two-dominant-cycle strategy.
+
+At every bar the engine takes a trailing window of price, asks your cycle model
+for the dominant cycles, projects their sum one bar forward, and goes long when
+the cycle turns up out of a trough and short (or flat) when it turns down from a
+peak. The fit at bar i uses only data up to bar i, so the test is out of sample.
+
+Your cycle model is a callable, cycle_fn(price_window), that returns a DataFrame
+with columns period, amplitude, phase, one row per cycle. Detrend inside the
+window in that function.
+
+run() returns a Result with the equity curve, per-bar position, a trade log, and
+stats including the hit rate.
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Callable, Optional
+import numpy as np
+import pandas as pd
+
+CycleFn = Callable[[np.ndarray], pd.DataFrame]
+
+
+def _pct(x) -> str:
+    return "n/a" if x is None or not np.isfinite(x) else f"{x * 100:.1f}%"
+
+
+@dataclass
+class Result:
+    equity: pd.Series       # net equity curve, starts at 1.0
+    returns: pd.Series      # per-bar strategy return
+    positions: pd.Series    # per-bar position, +1 long, -1 short, 0 flat
+    trades: pd.DataFrame    # one row per closed trade
+    stats: dict             # trades, hit_rate, total_return, cagr, sharpe, max_drawdown
+
+    def summary(self) -> str:
+        s = self.stats
+        rows = [
+            ("Trades", f"{s['trades']:d}"),
+            ("Hit rate", _pct(s["hit_rate"])),
+            ("Total return", _pct(s["total_return"])),
+            ("CAGR", _pct(s["cagr"])),
+            ("Sharpe", f"{s['sharpe']:.2f}"),
+            ("Max drawdown", _pct(s["max_drawdown"])),
+        ]
+        w = max(len(k) for k, _ in rows)
+        out = "\n".join(f"{k.ljust(w)}   {v}" for k, v in rows)
+        print(out)
+        return out
+
+
+class CycleBacktester:
+    def __init__(self, cycle_fn: CycleFn, window: int = 800,
+                 stop_loss: Optional[float] = None,
+                 take_profit: Optional[float] = None,
+                 allow_short: bool = True, cost: float = 0.0,
+                 phase_reference: str = "start",
+                 price_col: str = "price", date_col: str = "date"):
+        if window < 3:
+            raise ValueError("window must be at least 3")
+        if phase_reference not in ("start", "end"):
+            raise ValueError("phase_reference must be 'start' or 'end'")
+        self.cycle_fn = cycle_fn
+        self.window = window
+        self.stop_loss = stop_loss
+        self.take_profit = take_profit
+        self.allow_short = allow_short
+        self.cost = cost
+        self.phase_reference = phase_reference
+        self.price_col = price_col
+        self.date_col = date_col
+
+    # +1 if the projected cycle rises into the next unseen bar, else -1, 0 if no cycle
+    def _direction(self, cycles: pd.DataFrame) -> int:
+        p = cycles["period"].to_numpy(float)
+        a = cycles["amplitude"].to_numpy(float)
+        ph = cycles["phase"].to_numpy(float)
+        ok = np.isfinite(p) & np.isfinite(a) & np.isfinite(ph) & (p > 1) & (a > 0)
+        p, a, ph = p[ok], a[ok], ph[ok]
+        if p.size == 0:
+            return 0
+        w = 2.0 * np.pi / p
+        t = self.window - 1 if self.phase_reference == "start" else 0
+        now = float(np.sum(a * np.cos(w * t + ph)))
+        nxt = float(np.sum(a * np.cos(w * (t + 1) + ph)))
+        return 1 if nxt >= now else -1
+
+    def run(self, df: pd.DataFrame) -> Result:
+        price = df[self.price_col].to_numpy(float)
+        if self.date_col in df.columns:
+            dates = pd.to_datetime(df[self.date_col]).to_numpy()
+        else:
+            dates = np.arange(len(df))
+        n = len(price)
+        if n <= self.window:
+            raise ValueError("need more rows than the window")
+
+        pos = np.zeros(n)
+        position = 0
+        prev_dir = 0
+        entry_i = 0
+        entry_px = 0.0
+        trades = []
+
+        def close(exit_i, reason):
+            r = position * (price[exit_i] / entry_px - 1.0) - 2.0 * self.cost
+            trades.append({
+                "direction": position, "entry_i": entry_i, "exit_i": exit_i,
+                "entry_price": entry_px, "exit_price": price[exit_i],
+                "reason": reason, "ret": r,
+            })
+
+        for i in range(self.window - 1, n):
+            cycles = self.cycle_fn(price[i - self.window + 1: i + 1])
+            d = self._direction(cycles)
+            if d == 0:                       # no usable cycle, hold
+                pos[i] = position
+                continue
+
+            # stop loss / take profit, measured on the close at bar i, stop first
+            if position != 0:
+                r = position * (price[i] / entry_px - 1.0)
+                if self.stop_loss is not None and r <= -self.stop_loss:
+                    close(i, "stop")
+                    position = 0
+                elif self.take_profit is not None and r >= self.take_profit:
+                    close(i, "target")
+                    position = 0
+
+            # act only when the cycle flips, that is a trough or a peak just formed
+            if d != prev_dir:
+                want = d if (self.allow_short or d > 0) else 0
+                if want != position:
+                    if position != 0:
+                        close(i, "signal")
+                    if want != 0:
+                        entry_i, entry_px = i, price[i]
+                    position = want
+            prev_dir = d
+            pos[i] = position
+
+        if position != 0:
+            close(n - 1, "end")
+
+        return self._result(price, dates, pos, trades)
+
+    def _result(self, price, dates, pos, trades) -> Result:
+        n = len(price)
+        ret = np.zeros(n)
+        ret[1:] = pos[:-1] * (price[1:] / price[:-1] - 1.0)
+        ret -= self.cost * np.abs(np.diff(pos, prepend=0.0))   # turnover cost
+
+        equity = pd.Series((1.0 + ret).cumprod(), index=dates)
+        tdf = pd.DataFrame(trades)
+
+        live = ret[self.window - 1:]
+        years = len(live) / 252.0
+        end = float(equity.iloc[-1])
+        sharpe = live.mean() / live.std() * np.sqrt(252) if live.std() > 0 else np.nan
+        cagr = end ** (1.0 / years) - 1.0 if years > 0 and end > 0 else np.nan
+        max_dd = float((equity / equity.cummax() - 1.0).min())
+        hit = float((tdf["ret"] > 0).mean()) if len(tdf) else np.nan
+
+        stats = {
+            "trades": int(len(tdf)),
+            "hit_rate": hit,
+            "total_return": end - 1.0,
+            "cagr": cagr,
+            "sharpe": float(sharpe) if np.isfinite(sharpe) else np.nan,
+            "max_drawdown": max_dd,
+        }
+        return Result(equity, pd.Series(ret, index=dates),
+                      pd.Series(pos, index=dates), tdf, stats)
