@@ -1,0 +1,24 @@
+import pandas as pd
+
+def rank_by_priority(df, a=1.0, b=1.0, c=0.5):
+    out = df.copy()
+    periods = out["Period"].to_numpy()
+
+    def nearest_gap(p):
+        others = periods[periods != p]
+        return abs(others - p).min()
+
+    out["gap"] = out["Period"].map(nearest_gap)
+    out["isolation"] = out["gap"] / out["Period"]
+    out["priority"] = out["Period"]**a * out["score"]**b * (1 + c * out["isolation"])
+
+    return out.sort_values("priority", ascending=False).reset_index(drop=True)
+
+
+df = pd.DataFrame({
+    "Period": [31, 50, 77, 169],
+    "amp":    [25, 47, 77, 144],
+    "score":  [0.82, 0.94, 1.0, 0.85],
+})
+
+print(rank_by_priority(df))
