@@ -6,6 +6,18 @@ peaks = find_peaks(df['col'].values)[0]
 df['is_peak'] = False
 df.iloc[peaks, df.columns.get_loc('is_peak')] = True
 
+import numpy as np
+
+def composite_wave(waves, n, t0=0,
+                   period_col='period', amp_col='amplitude', phase_col='phase'):
+    p  = waves[period_col].to_numpy(float)
+    a  = waves[amp_col].to_numpy(float)
+    ph = waves[phase_col].to_numpy(float)
+    t  = np.arange(t0, t0 + n)
+    w  = 2.0 * np.pi / p
+    parts = a * np.cos(np.outer(t, w) + ph)   # (n, n_waves), one column per wave
+    return parts.sum(axis=1)                   # (n,)
+
 
 def rank_by_priority(df, a=1.0, b=1.0, c=0.5):
     out = df.copy()
