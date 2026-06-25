@@ -2,6 +2,9 @@ import pandas as pd
 
 
 df['is_peak'] = np.isin(np.arange(len(df)), find_peaks(df['col'].values)[0])
+peaks = find_peaks(df['col'].values)[0]
+df['is_peak'] = False
+df.iloc[peaks, df.columns.get_loc('is_peak')] = True
 
 
 def rank_by_priority(df, a=1.0, b=1.0, c=0.5):
