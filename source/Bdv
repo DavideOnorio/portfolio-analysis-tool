@@ -6,6 +6,18 @@ peaks = find_peaks(df['col'].values)[0]
 df['is_peak'] = False
 df.iloc[peaks, df.columns.get_loc('is_peak')] = True
 
+target = pd.Timestamp('2024-03-15')
+
+df['date'] = pd.to_datetime(df['date'])
+df = df.sort_values('date').reset_index(drop=True)
+
+below = df[df['date'] < target].tail(10)   # 10 closest before
+above = df[df['date'] > target].head(10)   # 10 closest after
+
+result = pd.concat([below, above])
+
+
+
 import numpy as np
 
 def composite_wave(waves, n, t0=0,
