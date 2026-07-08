@@ -1,258 +1,99 @@
-import pandas as pd
-import numpy as np, matplotlib.pyplot as plt
-
-short = [1.2, -0.4, 3.1, 2.2, -1.5, 0.8]   # your short returns
-long  = [2.0, 5.5, -1.1, 3.3, 4.1, -0.6]   # your long returns
-
-fig, ax = plt.subplots(figsize=(7, 5))
-colors = ["#C0504D", "#4F81BD"]
-
-parts = ax.violinplot([short, long], showextrema=False)
-for body, c in zip(parts["bodies"], colors):
-    body.set_facecolor(c); body.set_alpha(0.5)
-
-for i, data in enumerate([short, long], start=1):
-    ax.hlines(np.median(data), i-0.3, i+0.3, color="black", lw=2)
-    ax.hlines(np.mean(data),   i-0.3, i+0.3, color="black", lw=2, ls="--")
-
-ax.axhline(0, color="gray", lw=1)
-ax.set_xticks([1, 2]); ax.set_xticklabels(["Short", "Long"])
-ax.set_ylabel("Return")
-ax.set_title("Short vs Long returns")
-ax.grid(axis="y", alpha=0.3)
-for s in ("top", "right"): ax.spines[s].set_visible(False)
-
-plt.tight_layout()
-plt.savefig("violin.png", dpi=150)
-
-df['is_peak'] = np.isin(np.arange(len(df)), find_peaks(df['col'].values)[0])
-peaks = find_peaks(df['col'].values)[0]
-df['is_peak'] = False
-df.iloc[peaks, df.columns.get_loc('is_peak')] = True
-
-target = pd.Timestamp('2024-03-15')
-
-df['date'] = pd.to_datetime(df['date'])
-df = df.sort_values('date').reset_index(drop=True)
-
-below = df[df['date'] < target].tail(10)   # 10 closest before
-above = df[df['date'] > target].head(10)   # 10 closest after
-
-result = pd.concat([below, above])
-
-
-
-import numpy as np
-
-def composite_wave(waves, n, t0=0,
-                   period_col='period', amp_col='amplitude', phase_col='phase'):
-    p  = waves[period_col].to_numpy(float)
-    a  = waves[amp_col].to_numpy(float)
-    ph = waves[phase_col].to_numpy(float)
-    t  = np.arange(t0, t0 + n)
-    w  = 2.0 * np.pi / p
-    parts = a * np.cos(np.outer(t, w) + ph)   # (n, n_waves), one column per wave
-    return parts.sum(axis=1)                   # (n,)
-
-
-def rank_by_priority(df, a=1.0, b=1.0, c=0.5):
-    out = df.copy()
-    periods = out["Period"].to_numpy()
-
-    def nearest_gap(p):
-        others = periods[periods != p]
-        return abs(others - p).min()
-
-    out["gap"] = out["Period"].map(nearest_gap)
-    out["isolation"] = out["gap"] / out["Period"]
-    out["priority"] = out["Period"]**a * out["score"]**b * (1 + c * out["isolation"])
-
-    return out.sort_values("priority", ascending=False).reset_index(drop=True)
-
-
-df = pd.DataFrame({
-    "Period": [31, 50, 77, 169],
-    "amp":    [25, 47, 77, 144],
-    "score":  [0.82, 0.94, 1.0, 0.85],
-})
-
-print(rank_by_priority(df))
-
-
-"""
-cycle_backtester.py
-
-Compact walk-forward backtester for a two-dominant-cycle strategy.
-
-At every bar the engine takes a trailing window of price, asks your cycle model
-for the dominant cycles, projects their sum one bar forward, and goes long when
-the cycle turns up out of a trough and short (or flat) when it turns down from a
-peak. The fit at bar i uses only data up to bar i, so the test is out of sample.
-
-Your cycle model is a callable, cycle_fn(price_window), that returns a DataFrame
-with columns period, amplitude, phase, one row per cycle. Detrend inside the
-window in that function.
-
-run() returns a Result with the equity curve, per-bar position, a trade log, and
-stats including the hit rate.
-"""
-
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
-CycleFn = Callable[[np.ndarray], pd.DataFrame]
 
+def extract_two_trades(df_past_and_future_prices,
+                       future_start=None,
+                       peak_phase=90.0,
+                       trough_phase=270.0):
+    """
+    Phase-momentum version, not buy-the-low / sell-the-high.
 
-def _pct(x) -> str:
-    return "n/a" if x is None or not np.isfinite(x) else f"{x * 100:.1f}%"
+    Long trade : enter at the rising zero crossing of the wave
+                 (max upward velocity), exit when phase reaches
+                 the cycle peak (default 90 deg).
+    Short trade: enter at the falling zero crossing, exit when
+                 phase reaches the cycle trough (default 270 deg).
 
+    Parameters
+    ----------
+    df_past_and_future_prices : DataFrame with columns
+        ['Price', 'phase', 'wave']. Phase is assumed in degrees.
+    future_start : index label or int position where the unseen
+        (out of sample) part begins. Trades are only taken there.
+        If None, the whole frame is used.
+    Returns
+    -------
+    A copy of the input df containing only the rows that belong
+    to the two trades, with these extra columns:
+        trade_id, side, position, entry_price, exit_price, pnl
+    """
+    df = df_past_and_future_prices.copy()
+    df["phase"] = np.mod(df["phase"], 360.0)
 
-@dataclass
-class Result:
-    equity: pd.Series       # net equity curve, starts at 1.0
-    returns: pd.Series      # per-bar strategy return
-    positions: pd.Series    # per-bar position, +1 long, -1 short, 0 flat
-    trades: pd.DataFrame    # one row per closed trade
-    stats: dict             # trades, hit_rate, total_return, cagr, sharpe, max_drawdown
-
-    def summary(self) -> str:
-        s = self.stats
-        rows = [
-            ("Trades", f"{s['trades']:d}"),
-            ("Hit rate", _pct(s["hit_rate"])),
-            ("Total return", _pct(s["total_return"])),
-            ("CAGR", _pct(s["cagr"])),
-            ("Sharpe", f"{s['sharpe']:.2f}"),
-            ("Max drawdown", _pct(s["max_drawdown"])),
-        ]
-        w = max(len(k) for k, _ in rows)
-        out = "\n".join(f"{k.ljust(w)}   {v}" for k, v in rows)
-        print(out)
-        return out
-
-
-class CycleBacktester:
-    def __init__(self, cycle_fn: CycleFn, window: int = 800,
-                 stop_loss: Optional[float] = None,
-                 take_profit: Optional[float] = None,
-                 allow_short: bool = True, cost: float = 0.0,
-                 phase_reference: str = "start",
-                 price_col: str = "price", date_col: str = "date"):
-        if window < 3:
-            raise ValueError("window must be at least 3")
-        if phase_reference not in ("start", "end"):
-            raise ValueError("phase_reference must be 'start' or 'end'")
-        self.cycle_fn = cycle_fn
-        self.window = window
-        self.stop_loss = stop_loss
-        self.take_profit = take_profit
-        self.allow_short = allow_short
-        self.cost = cost
-        self.phase_reference = phase_reference
-        self.price_col = price_col
-        self.date_col = date_col
-
-    # +1 if the projected cycle rises into the next unseen bar, else -1, 0 if no cycle
-    def _direction(self, cycles: pd.DataFrame) -> int:
-        p = cycles["period"].to_numpy(float)
-        a = cycles["amplitude"].to_numpy(float)
-        ph = cycles["phase"].to_numpy(float)
-        ok = np.isfinite(p) & np.isfinite(a) & np.isfinite(ph) & (p > 1) & (a > 0)
-        p, a, ph = p[ok], a[ok], ph[ok]
-        if p.size == 0:
-            return 0
-        w = 2.0 * np.pi / p
-        t = self.window - 1 if self.phase_reference == "start" else 0
-        now = float(np.sum(a * np.cos(w * t + ph)))
-        nxt = float(np.sum(a * np.cos(w * (t + 1) + ph)))
-        return 1 if nxt >= now else -1
-
-    def run(self, df: pd.DataFrame) -> Result:
-        price = df[self.price_col].to_numpy(float)
-        if self.date_col in df.columns:
-            dates = pd.to_datetime(df[self.date_col]).to_numpy()
+    # restrict signal generation to the unseen window
+    if future_start is not None:
+        if isinstance(future_start, int):
+            live = df.index[future_start:]
         else:
-            dates = np.arange(len(df))
-        n = len(price)
-        if n <= self.window:
-            raise ValueError("need more rows than the window")
+            live = df.index[df.index.get_loc(future_start):]
+    else:
+        live = df.index
 
-        pos = np.zeros(n)
-        position = 0
-        prev_dir = 0
-        entry_i = 0
-        entry_px = 0.0
-        trades = []
+    wave = df["wave"]
+    prev = wave.shift(1)
 
-        def close(exit_i, reason):
-            r = position * (price[exit_i] / entry_px - 1.0) - 2.0 * self.cost
-            trades.append({
-                "direction": position, "entry_i": entry_i, "exit_i": exit_i,
-                "entry_price": entry_px, "exit_price": price[exit_i],
-                "reason": reason, "ret": r,
-            })
+    long_entry = (prev <= 0) & (wave > 0)    # rising zero cross
+    short_entry = (prev >= 0) & (wave < 0)   # falling zero cross
 
-        for i in range(self.window - 1, n):
-            cycles = self.cycle_fn(price[i - self.window + 1: i + 1])
-            d = self._direction(cycles)
-            if d == 0:                       # no usable cycle, hold
-                pos[i] = position
-                continue
+    def phase_reached(start_pos, target):
+        """First bar at/after start_pos where phase passes target,
+        handling the 360 wrap."""
+        ph = df["phase"].to_numpy()
+        for i in range(start_pos + 1, len(ph)):
+            a, b = ph[i - 1], ph[i]
+            if b < a:                       # wrapped past 360
+                b += 360.0
+                target_adj = target if target >= a else target + 360.0
+            else:
+                target_adj = target
+            if a < target_adj <= b:
+                return i
+        return None
 
-            # stop loss / take profit, measured on the close at bar i, stop first
-            if position != 0:
-                r = position * (price[i] / entry_px - 1.0)
-                if self.stop_loss is not None and r <= -self.stop_loss:
-                    close(i, "stop")
-                    position = 0
-                elif self.take_profit is not None and r >= self.take_profit:
-                    close(i, "target")
-                    position = 0
+    trades = []
+    for side, entries, exit_target in [
+        ("long", long_entry, peak_phase),
+        ("short", short_entry, trough_phase),
+    ]:
+        hits = df.index[entries & df.index.isin(live)]
+        if len(hits) == 0:
+            continue
+        e_label = hits[0]
+        e_pos = df.index.get_loc(e_label)
+        x_pos = phase_reached(e_pos, exit_target)
+        if x_pos is None:
+            x_pos = len(df) - 1             # no exit found, close on last bar
+        trades.append((side, e_pos, x_pos))
 
-            # act only when the cycle flips, that is a trough or a peak just formed
-            if d != prev_dir:
-                want = d if (self.allow_short or d > 0) else 0
-                if want != position:
-                    if position != 0:
-                        close(i, "signal")
-                    if want != 0:
-                        entry_i, entry_px = i, price[i]
-                    position = want
-            prev_dir = d
-            pos[i] = position
+    # annotate and slice
+    keep = np.zeros(len(df), dtype=bool)
+    for col, default in [("trade_id", np.nan), ("side", None),
+                         ("position", 0.0), ("entry_price", np.nan),
+                         ("exit_price", np.nan), ("pnl", np.nan)]:
+        df[col] = default
 
-        if position != 0:
-            close(n - 1, "end")
+    for tid, (side, e, x) in enumerate(sorted(trades, key=lambda t: t[1]), 1):
+        keep[e:x + 1] = True
+        sign = 1.0 if side == "long" else -1.0
+        ep = df["Price"].iloc[e]
+        xp = df["Price"].iloc[x]
+        rows = df.index[e:x + 1]
+        df.loc[rows, "trade_id"] = tid
+        df.loc[rows, "side"] = side
+        df.loc[rows, "position"] = sign
+        df.loc[rows, "entry_price"] = ep
+        df.loc[rows, "exit_price"] = xp
+        df.loc[rows, "pnl"] = sign * (xp - ep)
 
-        return self._result(price, dates, pos, trades)
-
-    def _result(self, price, dates, pos, trades) -> Result:
-        n = len(price)
-        ret = np.zeros(n)
-        ret[1:] = pos[:-1] * (price[1:] / price[:-1] - 1.0)
-        ret -= self.cost * np.abs(np.diff(pos, prepend=0.0))   # turnover cost
-
-        equity = pd.Series((1.0 + ret).cumprod(), index=dates)
-        tdf = pd.DataFrame(trades)
-
-        live = ret[self.window - 1:]
-        years = len(live) / 252.0
-        end = float(equity.iloc[-1])
-        sharpe = live.mean() / live.std() * np.sqrt(252) if live.std() > 0 else np.nan
-        cagr = end ** (1.0 / years) - 1.0 if years > 0 and end > 0 else np.nan
-        max_dd = float((equity / equity.cummax() - 1.0).min())
-        hit = float((tdf["ret"] > 0).mean()) if len(tdf) else np.nan
-
-        stats = {
-            "trades": int(len(tdf)),
-            "hit_rate": hit,
-            "total_return": end - 1.0,
-            "cagr": cagr,
-            "sharpe": float(sharpe) if np.isfinite(sharpe) else np.nan,
-            "max_drawdown": max_dd,
-        }
-        return Result(equity, pd.Series(ret, index=dates),
-                      pd.Series(pos, index=dates), tdf, stats)
+    return df.loc[keep].copy()
