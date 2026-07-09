@@ -1,6 +1,48 @@
+
 import numpy as np
-from scipy.linalg import eigh
-import numpy as np
+
+def hamilton_filter(y, h=24, p=4):
+    """
+    Hamilton (2018) regression filter.
+
+    Regress y[t] on a constant and y[t-h], y[t-h-1], ..., y[t-h-p+1].
+    Fitted values = trend, residuals = cycle.
+
+    Parameters
+    ----------
+    y : array
+    h : horizon in observations. Hamilton uses 8 for quarterly
+        (2 years). Scale to your frequency, e.g. ~2 years of days.
+    p : number of lags, 4 is the paper default.
+
+    Returns
+    -------
+    trend, cycle : arrays same length as y.
+        First h + p - 1 points are NaN, the method needs
+        that much history before it can say anything.
+    """
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    k = h + p - 1
+    if n <= k + p:
+        raise ValueError("series too short for this h and p")
+
+    # build regressors, y[t-h] ... y[t-h-p+1], target y[t]
+    X = np.column_stack(
+        [np.ones(n - k)] + [y[k - h - j : n - h - j] for j in range(p)]
+    )
+    Y = y[k:]
+
+    beta, *_ = np.linalg.lstsq(X, Y, rcond=None)
+    fitted = X @ beta
+
+    trend = np.full(n, np.nan)
+    cycle = np.full(n, np.nan)
+    trend[k:] = fitted
+    cycle[k:] = Y - fitted
+    return trend, cycle
+
+as np
 from scipy.linalg import cholesky_banded, cho_solve_banded
 
 def boosted_hp_fast(y, lam=1600.0, max_iter=50, tol=1e-4):
