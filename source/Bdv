@@ -1,5 +1,51 @@
 import numpy as np
 from scipy.linalg import eigh
+import numpy as np
+from scipy.linalg import cholesky_banded, cho_solve_banded
+
+def boosted_hp_fast(y, lam=1600.0, max_iter=50, tol=1e-4):
+    """
+    Boosted HP filter, fast banded version.
+
+    Factors (I + lam*K) once (pentadiagonal Cholesky, O(n)),
+    then each boosting pass is one banded solve, also O(n).
+    Stops when the cycle stops changing (relative L2 change < tol)
+    or at max_iter.
+
+    Returns trend, cycle with y = trend + cycle.
+    """
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    if n < 6:
+        raise ValueError("series too short")
+
+    # diagonals of K = D2'D2
+    d0 = np.full(n, 6.0)
+    d0[[0, -1]] = 1.0
+    d0[[1, -2]] = 5.0
+    d1 = np.full(n - 1, -4.0)
+    d1[[0, -1]] = -2.0
+    d2 = np.ones(n - 2)
+
+    # upper banded storage of I + lam*K for cholesky_banded
+    ab = np.zeros((3, n))
+    ab[2] = 1.0 + lam * d0
+    ab[1, 1:] = lam * d1
+    ab[0, 2:] = lam * d2
+
+    L = cholesky_banded(ab)          # factor once
+
+    cycle = y.copy()
+    for _ in range(max_iter):
+        smooth = cho_solve_banded((L, False), cycle)  # S @ cycle
+        new_cycle = cycle - smooth
+        change = np.linalg.norm(new_cycle - cycle) / (np.linalg.norm(cycle) + 1e-12)
+        cycle = new_cycle
+        if change < tol:
+            break
+
+    trend = y - cycle
+    return trend, cycle
 
 def boosted_hp(y, lam=1600.0, max_iter=100, stop='bic'):
     """
