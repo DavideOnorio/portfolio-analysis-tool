@@ -1,5 +1,59 @@
 import numpy as np
 import pandas as pd
+import numpy as np
+from scipy.linalg import eigh
+from scipy.optimize import minimize_scalar
+
+def estimate_lambda_gcv(y, lam_min=1e0, lam_max=1e14):
+    """
+    Pick HP filter lambda by generalized cross validation.
+
+    HP trend solves min ||y - t||^2 + lam * ||D2 t||^2,
+    so t = (I + lam K)^-1 y with K = D2'D2.
+    Eigendecompose K = Q diag(d) Q' once. Then
+        tr S(lam)   = sum 1/(1 + lam d_i)
+        ||y - t||^2 = sum (lam d_i / (1 + lam d_i))^2 z_i^2
+    with z = Q'y. GCV over lambda becomes a cheap 1d problem.
+
+    Returns the lambda minimizing GCV, clipped to [lam_min, lam_max].
+    """
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    if n < 10:
+        raise ValueError("window too short")
+
+    # second difference penalty K = D2'D2
+    D = np.zeros((n - 2, n))
+    for i in range(n - 2):
+        D[i, i], D[i, i + 1], D[i, i + 2] = 1.0, -2.0, 1.0
+    K = D.T @ D
+
+    # one-time cost, O(n^3). fine for windows up to a few thousand.
+    d, Q = eigh(K)
+    d = np.clip(d, 0.0, None)   # kill tiny negative rounding noise
+    z2 = (Q.T @ y) ** 2
+
+    def gcv_log(loglam):
+        lam = np.exp(loglam)
+        a = lam * d / (1.0 + lam * d)      # residual factor per eigenmode
+        rss = np.sum(a**2 * z2)
+        df = np.sum(1.0 / (1.0 + lam * d))  # tr S(lam)
+        denom = (n - df)
+        if denom <= 0:
+            return np.inf
+        return n * rss / denom**2
+
+    # coarse grid first so we don't get stuck in a flat region
+    grid = np.linspace(np.log(lam_min), np.log(lam_max), 60)
+    vals = [gcv_log(g) for g in grid]
+    g0 = grid[int(np.argmin(vals))]
+
+    # refine around the grid winner
+    lo = max(np.log(lam_min), g0 - 1.0)
+    hi = min(np.log(lam_max), g0 + 1.0)
+    res = minimize_scalar(gcv_log, bounds=(lo, hi), method='bounded')
+
+    return float(np.exp(res.x))
 
 import numpy as np
 from statsmodels.tsa.statespace.structural import UnobservedComponents
