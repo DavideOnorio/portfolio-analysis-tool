@@ -1,4 +1,77 @@
 import numpy as np
+from scipy.linalg import eigh
+
+def boosted_hp(y, lam=1600.0, max_iter=100, stop='bic'):
+    """
+    Boosted HP filter, Phillips & Shi (2021, IER).
+
+    Repeatedly applies the HP filter to the remaining cycle and
+    accumulates the fitted parts into the trend. Stops by BIC
+    (or runs a fixed number of passes with stop='none').
+
+    With S = (I + lam K)^-1 and A = I - S, after m passes
+        cycle_m = A^m y,   trend_m = y - cycle_m.
+    Using the eigendecomposition K = Q diag(d) Q', A^m is just
+    a_i^m on each eigenmode, so every pass is O(n).
+
+    Parameters
+    ----------
+    y : array, the series
+    lam : HP penalty per pass. Standard values are fine,
+          boosting corrects for a mediocre choice.
+    max_iter : cap on boosting passes
+    stop : 'bic' for automatic stopping, 'none' for max_iter passes
+
+    Returns
+    -------
+    trend, cycle : arrays, y = trend + cycle
+    """
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    if n < 10:
+        raise ValueError("series too short")
+
+    # penalty K = D2'D2, eigendecompose once
+    D = np.zeros((n - 2, n))
+    for i in range(n - 2):
+        D[i, i], D[i, i + 1], D[i, i + 2] = 1.0, -2.0, 1.0
+    d, Q = eigh(D.T @ D)
+    d = np.clip(d, 0.0, None)
+
+    z = Q.T @ y                      # y in eigenbasis
+    a = lam * d / (1.0 + lam * d)    # eigenvalues of A = I - S
+
+    # variance of raw second differences, scale for BIC
+    sig0 = np.sum((a * z) ** 2)      # ||cycle after 1 pass||^2 base term
+
+    best_bic = np.inf
+    best_m = 1
+    am = a.copy()                    # a^m, starts at m = 1
+
+    for m in range(1, max_iter + 1):
+        cycle_hat = am * z
+        rss = np.sum(cycle_hat ** 2)
+        # effective df of the trend after m passes, tr(I - A^m)
+        df = n - np.sum(am)
+
+        bic = np.log(rss / n) + df * np.log(n) / n
+
+        if stop == 'bic':
+            if bic < best_bic:
+                best_bic = bic
+                best_m = m
+            else:
+                break                # BIC turned up, stop
+        am = am * a                  # next power
+
+    m = best_m if stop == 'bic' else max_iter
+
+    cycle = Q @ (a ** m * z)
+    trend = y - cycle
+    return trend, cycle
+
+
+import numpy as np
 import pandas as pd
 import numpy as np
 from scipy.linalg import eigh
