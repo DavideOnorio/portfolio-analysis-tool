@@ -1,6 +1,32 @@
 import numpy as np
 import pandas as pd
 
+import numpy as np
+from statsmodels.tsa.statespace.structural import UnobservedComponents
+
+def estimate_lambda(y, lam_min=1e2, lam_max=1e12):
+    """
+    Estimate HP filter lambda from the data via ML.
+    lambda = sigma2_cycle / sigma2_trend
+    Clipped to [lam_min, lam_max] to keep short/noisy
+    windows from producing crazy values.
+    """
+    y = np.asarray(y, dtype=float)
+    if len(y) < 20:
+        raise ValueError("window too short to estimate lambda reliably")
+
+    mod = UnobservedComponents(y, level='lltrend')
+    res = mod.fit(disp=False)
+    p = dict(zip(res.param_names, res.params))
+
+    s2_cycle = p['sigma2.irregular']
+    s2_trend = p['sigma2.trend']
+
+    if s2_trend <= 1e-12:
+        return lam_max  # basically no trend variation, smooth hard
+
+    return float(np.clip(s2_cycle / s2_trend, lam_min, lam_max))
+
 
 def extract_two_trades(df_past_and_future_prices,
                        future_start=None,
