@@ -1,3 +1,22 @@
+import pandas as pd
+import numpy as np
+
+def top_n(df, n=10, w_gen=0.5, w_score=0.5, bonus_max=0.1, only_max=False):
+    d = df.copy()
+
+    if only_max:
+        d = d[d["is_max"]]
+
+    # rank-based normalization, robust to outliers
+    d["gen_n"] = d["gen_score"].rank(pct=True)
+    d["score_n"] = d["score"].rank(pct=True)
+
+    d["final"] = w_gen * d["gen_n"] + w_score * d["score_n"]
+    d["final"] += np.where(d["is_max"], bonus_max, 0)
+
+    return d.nlargest(n, "final")
+
+best = top_n(df, n=5)
 
 import numpy as np
 
