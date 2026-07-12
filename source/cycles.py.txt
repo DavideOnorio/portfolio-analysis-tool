@@ -1,302 +1,317 @@
-"""
-Cycle Scanner
-A working implementation of the four-step framework from the FSC whitepaper.
-Dependencies: numpy, scipy.
-"""
+# From the Formula to the Matrix, Step by Step
 
-import numpy as np
-from scipy.sparse import eye, diags
-from scipy.sparse.linalg import spsolve
+## The two things we are balancing
 
+We want a trend τ (tau) that stays close to the data y, and that bends as little as possible. Written as a single number to minimize, that is
 
-# ----------------------------------------------------------------------
-# Step 1 Detrending (Hodrick-Prescott filter)
-# ----------------------------------------------------------------------
-def hp_filter(y, lam=1600.0) -> tuple[np.ndarray, np.ndarray]:
-    """Separate data into a trend and a cycle. Higher lambda values create a smoother trend."""
-    y = np.asarray(y, dtype=float)
-    n = len(y)
-    if n < 3:
-        return y.copy(), np.zeros_like(y)
+```
+S(τ) = Σ_{t=1}^{n} (y_t − τ_t)²   +   λ Σ_{t=2}^{n−1} (τ_{t−1} − 2τ_t + τ_{t+1})²
+```
 
-    # second-difference matrix D (size (n-2) x n)
-    diagonals = [np.ones(n), -2.0 * np.ones(n), np.ones(n)]
-    D = diags(diagonals, [0, 1, 2], shape=(n - 2, n))
+The first sum is the fit term. It grows whenever the trend drifts away from the data. The second sum is the bend term. Each piece inside it, τ_{t−1} − 2τ_t + τ_{t+1}, is the discrete second derivative of τ at point t, it tells you how much the slope changes right at that point. If τ moves in a straight line through three consecutive points, that expression is exactly zero, since a straight line has no change in slope. λ decides how much a bend costs relative to how much a mismatch with the data costs.
 
-    I = eye(n)
-    trend = spsolve((I + lam * (D.T @ D)).tocsc(), y)
-    cycle = y - trend
-    return trend, cycle
+Both sums need to become matrix expressions before we can solve for τ directly. The fit term is the easy one. The bend term is where the real derivation happens.
 
+## The fit term as a vector formula
 
-# ----------------------------------------------------------------------
-# Step 2 Cycle detection (Goertzel)
-# ----------------------------------------------------------------------
-def goertzel(x, period) -> tuple[float, float]:
-    """Calculate the amplitude and phase of a specific cycle period. The phase starts at the first sample."""
-    x = np.asarray(x, dtype=float)
-    n = len(x)
-    omega = 2.0 * np.pi / period
-    cos_w = np.cos(omega)
-    sin_w = np.sin(omega)
-    coeff = 2.0 * cos_w
+Stack all the y_t values into one column vector y, and all the τ_t values into one column vector τ, both of length n. The difference y − τ is itself a vector, and
 
-    s_prev = 0.0
-    s_prev2 = 0.0
-    for sample in x:
-        s = sample + coeff * s_prev - s_prev2
-        s_prev2 = s_prev
-        s_prev = s
+```
+Σ_{t=1}^{n} (y_t − τ_t)²  =  (y − τ)ᵀ(y − τ)  =  ‖y − τ‖²
+```
 
-    real = s_prev - s_prev2 * cos_w
-    imag = s_prev2 * sin_w
+That's just the definition of a dot product of a vector with itself, applied to y − τ. Nothing new is built here, this is a direct rewrite.
 
-    amplitude = 2.0 * np.hypot(real, imag) / n
-    phase = np.arctan2(imag, real)
-    return amplitude, phase
+## The bend term, one piece at a time
 
+Now look at a single term from the second sum, at some interior point t.
 
-def scan_periods(x, min_period=8, max_period=None, step=1.0) -> list[tuple[float, float]]:
-    """Scan a range of periods using the Goertzel algorithm. Return results sorted by highest amplitude."""
-    n = len(x)
-    if max_period is None:
-        max_period = n // 2  # cannot trust cycles longer than half the data
+```
+τ_{t−1} − 2τ_t + τ_{t+1}
+```
 
-    results = []
-    p = float(min_period)
-    while p <= max_period:
-        amp, _ = goertzel(x, p)
-        results.append((p, amp))
-        p += step
+This is a weighted combination of three entries of τ, with weights 1, −2, and 1, and every other entry of τ getting a weight of 0. That means this whole expression can be written as a dot product between τ and a row vector that holds those weights in the right positions. Call that row vector D_t. It has a 1 in position t−1, a −2 in position t, a 1 in position t+1, and zero everywhere else. Then
 
-    results.sort(key=lambda r: r[1], reverse=True)
-    return results
+```
+τ_{t−1} − 2τ_t + τ_{t+1}  =  D_t · τ
+```
 
+for every interior point t from 2 to n−1. That's n−2 different row vectors, one for each interior point.
 
-def fit_sinusoid(x, period) -> tuple[float, float, float]:
-    """Perform a least-squares fit for a single sinusoid. This provides clean amplitude and phase data for projections."""
-    x = np.asarray(x, dtype=float)
-    n = len(x)
-    t = np.arange(n)
-    omega = 2.0 * np.pi / period
+## Stacking the rows into a matrix
 
-    # model: x ~ a*cos(omega t) + b*sin(omega t) + c
-    A = np.column_stack([np.cos(omega * t), np.sin(omega * t), np.ones(n)])
-    coef, *_ = np.linalg.lstsq(A, x, rcond=None)
-    a, b, _ = coef
+Stack all of those row vectors D_2, D_3, ..., D_{n−1} on top of each other, in order, and call the result D. Since each row has length n and there are n−2 of them, D has shape (n−2) by n. Multiplying D by τ produces a column vector with n−2 entries, and entry number t−1 of that vector is exactly D_t · τ, the second difference at point t.
 
-    amplitude = np.hypot(a, b)
-    phase_first = np.arctan2(-b, a)               # phase at t = 0
-    phase_last = (phase_first + omega * (n - 1))  # phase at the last bar
-    phase_last = (phase_last + np.pi) % (2 * np.pi) - np.pi
-    return amplitude, phase_first, phase_last
+```
+Dτ  =
+[ D_2 · τ ]     [ τ_1 − 2τ_2 + τ_3         ]
+[ D_3 · τ ]  =  [ τ_2 − 2τ_3 + τ_4         ]
+[   ⋮    ]     [           ⋮              ]
+[D_{n−1}·τ]    [ τ_{n−2} − 2τ_{n−1} + τ_n  ]
+```
 
+So Dτ is not one number, it is the entire list of second differences, computed in a single matrix multiplication instead of one at a time.
 
-# ----------------------------------------------------------------------
-# Step 3 Validation (Bartels test)
-# ----------------------------------------------------------------------
-def bartels_test(x, period) -> tuple[float, float]:
-    """Test the statistical significance of a cycle. Return the probability score and the genuine percentage."""
-    x = np.asarray(x, dtype=float)
-    P = int(round(period))
-    n = len(x)
-    k = n // P  # number of whole cycles available
-    if k < 2 or P < 2:
-        return 1.0, 0.0  # not enough data to judge, treat as random
+## Turning the bend term into ‖Dτ‖² and then τᵀDᵀDτ
 
-    t = np.arange(P)
-    cos_t = np.cos(2.0 * np.pi * t / P)
-    sin_t = np.sin(2.0 * np.pi * t / P)
+Once you know Dτ holds every term from the bend sum, the sum of their squares is just the squared length of that vector.
 
-    phasors = []
-    for j in range(k):
-        seg = x[j * P:(j + 1) * P]
-        real = np.dot(seg, cos_t)
-        imag = -np.dot(seg, sin_t)
-        phasors.append(complex(real, imag))
+```
+Σ_{t=2}^{n−1} (τ_{t−1} − 2τ_t + τ_{t+1})²  =  (Dτ)ᵀ(Dτ)  =  ‖Dτ‖²
+```
 
-    phasors = np.array(phasors)
-    resultant = np.abs(np.sum(phasors))           # length of the vector sum
-    sum_sq = np.sum(np.abs(phasors) ** 2)         # expected spread if random
-    if sum_sq == 0:
-        return 1.0, 0.0
+There is one more rewrite worth doing, because it matters later when we take a derivative. Transposing a product reverses the order of the pieces and transposes each one, so (Dτ)ᵀ = τᵀDᵀ. Substituting that in
 
-    bartels_score = float(np.exp(-(resultant ** 2) / sum_sq))
-    genuine_pct = (1.0 - bartels_score) * 100.0
-    return bartels_score, genuine_pct
+```
+‖Dτ‖²  =  (Dτ)ᵀ(Dτ)  =  τᵀDᵀDτ
+```
+
+τᵀDᵀDτ is a single number, built from the n by n matrix DᵀD sitting between two copies of τ. This is the form we need for the next step.
+
+## The full objective in matrix form
+
+Putting both pieces together, the whole thing we are minimizing is
+
+```
+S(τ)  =  (y − τ)ᵀ(y − τ)  +  λ τᵀDᵀDτ
+```
+
+Every part of this started out as a sum written term by term over the data. Nothing about the underlying problem changed, this is only a more compact way to write it, one that vector calculus can work with directly.
+
+## Solving for τ
+
+To minimize S(τ), take its derivative with respect to the vector τ and set the result to zero. Two standard vector calculus rules are used here. The derivative of (y − τ)ᵀ(y − τ) with respect to τ is −2(y − τ). The derivative of τᵀMτ with respect to τ, for any symmetric matrix M, is 2Mτ, and DᵀD is symmetric, so that rule applies directly with M = DᵀD.
+
+```
+dS/dτ  =  −2(y − τ)  +  2λ DᵀDτ  =  0
+```
+
+Divide everything by 2 and move terms around.
+
+```
+−(y − τ)  +  λ DᵀDτ  =  0
+τ − y + λ DᵀDτ  =  0
+(I + λ DᵀD) τ  =  y
+```
+
+I is the n by n identity matrix. This is the equation the whole HP filter comes down to, one matrix, one unknown vector τ, one linear system. Solving it gives
+
+```
+τ  =  (I + λ DᵀD)⁻¹ y
+```
+SUMMARY:
+
+Two goals get folded into one formula. Staying close to the data costs (y − τ)ᵀ(y − τ). Staying smooth costs λ times τᵀDᵀDτ, where D is the matrix built from the 1, −2, 1 pattern that computes every second difference of τ in one shot. Setting the derivative of that combined cost to zero collapses everything down to one equation.
+
+(I + λ DᵀD) τ = y
+
+Solving it hands back the trend τ directly, and y − τ is the cycle.
+
+D holds the second difference pattern sliding one column at a time across the data. DᵀD, built from D times its own transpose, settles into the pattern 1, −4, 6, −4, 1 away from the edges, tapering down near the first and last few points.
+
+λ is the only dial in the whole system. A small λ lets τ follow y closely. A large λ pushes τ toward a straight line, since a straight line is the one shape with zero second difference everywhere
 
 
-# ----------------------------------------------------------------------
-# Step 4 Ranking + full pipeline
-# ----------------------------------------------------------------------
-def cycle_scan(y, lam=1600.0, min_period=8, max_period=None, step=1.0, top_candidates=25, genuine_threshold=49.0) -> list[dict]:
-    """Run the complete four-step cycle detection pipeline. Return valid cycles sorted by strength per bar."""
-    _, cyc = hp_filter(y, lam=lam)
+Key point
+The HP filter separates a data series into two components, a smooth trend and a residual cycle. It finds the trend by minimizing a cost function with two competing terms, one penalizing deviation from the original data, the other penalizing curvature in the trend line. The smoothing parameter lambda sets the relative weight between these two terms. A low lambda biases the trend toward the raw data, leaving little residual. A high lambda forces near linearity in the trend, pushing most of the data's variation into the cycle component.
+Summary
+The function decomposes the input series into a trend component and a cycle component. The trend is the smoothest series consistent with the data, subject to the constraint imposed by lambda. The cycle is defined as the residual, the original series minus the trend. This cycle component is the input for the later stages of the framework, which scan it for periodicity and test the statistical significance of any detected cycles. Lambda is the primary tuning parameter in this step, controlling the tradeoff between fidelity to the original data and smoothness of the extracted trend.
 
-    ranked = scan_periods(cyc, min_period, max_period, step)
-    candidates = ranked[:top_candidates]
+=======================
 
-    out = []
-    for period, _scan_amp in candidates:
-        amplitude, phase_first, phase_last = fit_sinusoid(cyc, period)
-        bartels_score, genuine = bartels_test(cyc, period)
-        if genuine < genuine_threshold:
-            continue  # drop cycles that fail validation
-        out.append({
-            "period": round(period, 2),
-            "amplitude": round(amplitude, 4),
-            "strength_per_bar": round(amplitude / period, 5),
-            "genuine_pct": round(genuine, 1),
-            "bartels_score": round(bartels_score, 4),
-            "phase_last_bar_deg": round(np.degrees(phase_last), 1),
-        })
+This is Step 2 of the whitepaper's four-step framework, the part that hunts down candidate cycle lengths in the detrended data. Here's the math sitting underneath both functions.
 
-    out.sort(key=lambda c: c["strength_per_bar"], reverse=True)
-    return out
+**goertzel(x, period)**
 
+Say x has N samples, x(0) through x(N-1). N is called n in the code. For a candidate period, the angular frequency is
 
-def project_cycle(cycle_info, history_len, bars_ahead=30) -> np.ndarray:
-    """Rebuild a valid cycle and project it into the future. This generates future values for charting."""
-    period = cycle_info["period"]
-    amp = cycle_info["amplitude"]
-    phase_last = np.radians(cycle_info["phase_last_bar_deg"])
-    omega = 2.0 * np.pi / period
-    future_t = np.arange(1, bars_ahead + 1)
-    return amp * np.cos(omega * future_t + phase_last)
+ω = 2π / period
 
+What you actually want is one value of the discrete Fourier transform, the number that measures how much of x lines up with a wave at that exact frequency.
 
-# ----------------------------------------------------------------------
-# Demo plant known cycles in fake data and check we recover them
-# ----------------------------------------------------------------------
-def _demo() -> tuple[np.ndarray, list[dict]]:
-    """Generate fake data with known cycles to test the scanner. Print the results to the console."""
-    rng = np.random.default_rng(42)
-    n = 600
-    t = np.arange(n)
+X = Σ (n=0 to N-1) x(n) · e^(-iωn)
 
-    # three planted cycles, a trend, and noise
-    signal = (
-        1.0 * np.cos(2 * np.pi * t / 20 + 0.5) +     # period 20
-        0.6 * np.cos(2 * np.pi * t / 33 + 1.2) +     # period 33
-        0.4 * np.cos(2 * np.pi * t / 55 + 2.0)       # period 55
-    )
-    trend = 0.004 * t + 1e-5 * (t - n / 2) ** 2
-    noise = rng.normal(0, 0.7, n)                     # heavy noise
-    y = signal + trend + noise
+Computed directly, this means working out cos(ωn) and sin(ωn) for every n, for every period tested. That's fine once. scan_periods calls this hundreds of times, once per candidate period, so it adds up. Goertzel swaps this out for a recursive filter that only needs cos(ω) and sin(ω) computed once, no matter how long x is or how many periods get swept. That recursion is the for loop.
 
-    print("Planted cycles: period 20 (amp 1.0), 33 (amp 0.6), 55 (amp 0.4)")
-    print("Trend and heavy noise added.\n")
+s(n) = x(n) + 2cos(ω)·s(n-1) - s(n-2)
 
-    results = cycle_scan(y, lam=1600, min_period=8, max_period=120, step=1.0)
+starting from s(-1) = 0 and s(-2) = 0. coeff in the code is just 2cos(ω), worked out once before the loop starts.
 
-    print(f"{'period':>7} {'amp':>7} {'strength/bar':>13} "
-          f"{'genuine%':>9} {'phase_last':>11}")
-    print("-" * 52)
-    for c in results[:8]:
-        print(f"{c['period']:>7} {c['amplitude']:>7} "
-              f"{c['strength_per_bar']:>13} {c['genuine_pct']:>8}% "
-              f"{c['phase_last_bar_deg']:>9}")
+Here's why it works. That recursion is a filter with two poles sitting at e^(iω) and e^(-iω), right on the frequency being tested. Feed x through it and the part of x oscillating at that same frequency keeps building up inside s(n) as more samples arrive, while everything else stays bounded. Work out this filter's impulse response and it comes out clean.
 
-    if results:
-        dom = results[0]
-        print(f"\nDominant cycle: period {dom['period']} bars, "
-              f"genuine {dom['genuine_pct']}%")
-        fwd = project_cycle(dom, n, bars_ahead=10)
-        print("Next 10 projected values of the dominant cycle:")
-        print(np.round(fwd, 3))
+h(n) = sin(ω(n+1)) / sin(ω), for n ≥ 0
 
-    return y, results
+s(n) is x convolved with this h. Take the last two values once the loop ends, s(N-1) and s(N-2), and combine them the way the code does.
 
+Real = s(N-1) - cos(ω)·s(N-2)
+Imag = sin(ω)·s(N-2)
 
-if __name__ == "__main__":
-    _demo()
+Work through that combination and it lands on exactly this.
 
-import numpy as np
-import matplotlib.pyplot as plt
+Real + i·Imag = Σ (k=0 to N-1) x(k) · e^(iω(N-1-k))
 
-def plot_composite_wave(y_detrended, valid_cycles):
-    n = len(y_detrended)
-    t_hist = np.arange(n)
-    t_rev = np.arange(-n + 1, 1)
-    
-    composite = np.zeros(n)
-    
-    for c in valid_cycles:
-        omega = 2.0 * np.pi / c["period"]
-        phase = np.radians(c["phase_last_bar_deg"])
-        wave = c["amplitude"] * np.cos(omega * t_rev + phase)
-        composite += wave
-        
-    plt.figure(figsize=(10, 4))
-    plt.plot(t_hist, y_detrended, color="lightgray", label="Detrended Price")
-    plt.plot(t_hist, composite, color="blue", label="Composite Model")
-    plt.title("Real Data vs Composite Cycle Model")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+Pull out the constant rotation e^(iω(N-1)) and what's left is exactly the standard X from above. A pure rotation never changes a complex number's length, only its angle. So whatever amplitude X would have given, Real and Imag give the same one. The phase is the part that shifts.
 
-def plot_validation_scatter(valid_cycles):
-    periods = [c["period"] for c in valid_cycles]
-    scores = [c["genuine_pct"] for c in valid_cycles]
-    
-    plt.figure(figsize=(10, 4))
-    plt.scatter(periods, scores, color="black")
-    plt.axhline(y=95.0, color="red", linestyle="--", label="95% Confidence")
-    plt.title("Cycle Period vs Genuine Percentage")
-    plt.xlabel("Period")
-    plt.ylabel("Genuine %")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+Now bring in a clean model, x(n) = A·cos(ωn + φ), with φ the phase at n=0. For this signal, X itself works out to, to leading order,
+
+X ≈ (A·N/2) · e^(iφ)
+
+(this is the same leakage effect behind spectral leakage in windowed FFTs; there's a second, smaller term riding along, a geometric sum of e^(-2iωn) across all N samples, capped in size around 1/|sin(ω)|, a number that doesn't grow with N, so it matters less the more full cycles sit inside the window). Combine that with the rotation above and
+
+Real + i·Imag ≈ (A·N/2) · e^(i(φ + ω(N-1)))
+
+Two things fall out. The amplitude,
+
+amplitude = 2·√(Real² + Imag²) / N ≈ A
+
+(that's what hypot is computing) matches the code and matches A regardless of the rotation, for the reason above. The phase,
+
+phase = atan2(Imag, Real) ≈ φ + ω(N-1)
+
+and φ + ω(N-1) is the phase of that same cosine at n = N-1, the last sample, not the first one. The docstring says phase is referenced to the first sample. Work the algebra through and it's actually referenced to the last one. That doesn't break anything here, since scan_periods throws this phase away and never uses it, but it matters if you ever call goertzel() directly and read its phase for something else.
+
+**scan_periods(x, min_period, max_period, step)**
+
+This is the brute-force sweep. It calls goertzel once for every candidate period from min_period up to max_period, spaced by step, keeps only the amplitude each time (amp, _ = goertzel(...), the phase gets dropped for the reason above), then sorts the whole list by amplitude, strongest first.
+
+min_period defaults to 8. Very short periods sit close to 2 bars, the shortest cycle length sampled data can represent at all, and testing anywhere near that gets unreliable fast. 8 is a practical floor, not a hard mathematical one.
+
+max_period, left unset, defaults to n // 2, half the data length. This ties straight back to the leakage term above. A cycle needs to complete at least twice inside the window before its energy can be trusted over that leftover term. Ask the scanner to judge a 300-bar cycle from 400 bars of data and you're asking it to call something periodic off one and a bit repeats, closer to fitting a slow swing than finding a genuine cycle. That's the same spurious-cycle trap the whitepaper flags for the HP filter in Step 1.
+
+step sets the spacing of the sweep. At the default of 1.0, only whole numbers get tested, 8, 9, 10, and so on. Drop it to 0.5 or smaller and fractional periods get tested too, 24.5, 24.0, 23.5. This is a real advantage Goertzel has here over an FFT. FFT bins sit at fixed spots, N divided by an integer, and that grid gets sparser as the period grows. With N=300 samples, the bins near a 150-bar cycle jump straight to 100 bars, a 50-bar gap. A genuine cycle at 120 bars has no bin anywhere close. Goertzel puts ω = 2π / period straight into the recursion, so a test point can sit at any period at all. The cost is that each period tested is its own O(N) pass, so sweeping a few hundred periods runs a few hundred times slower than one FFT call, traded for landing exactly on whatever period is really there instead of the nearest bin.
+
+Once the sweep finishes, the list is ordered by raw amplitude, and that's as far as this function goes. Worth being clear about what that ordering does and doesn't mean. The whitepaper is explicit that amplitude alone isn't the same as a cycle's real pull on price per bar, its own example has a 110-bar cycle at amplitude 300 losing to a 60-bar cycle at amplitude 200 once you divide by length. So this sorted list is a shortlist, not a verdict. cycle_scan takes the top candidates from here, re-fits each one with fit_sinusoid for a cleaner amplitude and a phase properly anchored to the last bar, runs each through the Bartels test to drop anything that looks random, and only then re-sorts by strength per bar for the real ranking. scan_periods's whole job is narrowing a large space of possible periods down to a short list worth that closer look.
+
+===============
+
+This is Step 3, the validation check that comes right after Step 2 finds candidate periods. The whitepaper's own worry drives it, the HP filter and Goertzel sweep can both surface a period that just isn't really there, so Step 3 asks a sharper question. Not "is there energy at this period" but "does this period actually repeat with a stable phase, or did I just get lucky once."
+
+**bartels_test(x, period)**
+
+The series gets cut into k back-to-back, non-overlapping chunks, each exactly P = round(period) samples long, where k = n // P. Each chunk becomes a single complex number, a phasor, using the same single-frequency correlation from Step 2, just computed directly with a dot product this time since P is now a fixed, known whole number rather than something Goertzel has to sweep for.
+
+real(j) = Σ (t=0 to P-1) seg(j,t) · cos(2πt/P)
+imag(j) = -Σ (t=0 to P-1) seg(j,t) · sin(2πt/P)
+phasor(j) = real(j) + i·imag(j)
+
+seg(j, t) is sample t of chunk j, that is x(jP + t). Every chunk gets measured against the exact same one-cycle template, cos(2πt/P) and sin(2πt/P), so phasor(j) tells you how strongly, and at what angle, chunk j lines up with a wave of that period.
+
+Here's the idea behind stacking them up. If period really is the cycle's true length, every chunk captures roughly the same slice of that cycle, so all k phasors should point in roughly the same direction, differing mostly in strength. Add k vectors pointing the same way and the sum comes out almost as long as adding their lengths outright. If period isn't real, each chunk's phasor lands at whatever angle that particular stretch of noise happened to produce, unrelated to the others, and adding vectors pointing in random directions is more like a drunkard's walk, the sum grows far slower than adding their lengths would suggest, and mostly cancels out.
+
+resultant = |Σ (j=0 to k-1) phasor(j)|
+sum_sq = Σ (j=0 to k-1) |phasor(j)|²
+
+resultant is the length of that vector sum. sum_sq is the sum of each individual phasor's squared length on its own, no addition of directions involved.
+
+sum_sq isn't just a normalizer, it's the exact answer to a specific question, how long would this resultant be, on average, if the phasors' directions were pure chance. Expand resultant² out as a double sum over all pairs of phasors. The k terms where a phasor pairs with itself always contribute its own squared length, no randomness involved, and those add up to exactly sum_sq. The remaining cross terms, one phasor against a different one, each carry a factor built from the difference between two angles. If those angles are just chance, unrelated from chunk to chunk, that factor spins around the full circle and averages to zero. So on average, under pure chance, resultant² comes out to exactly sum_sq, no more, no less. That's the whole reason sum_sq is built this way, it's the chance baseline, given the chunk strengths you actually measured.
+
+Knowing the average isn't enough by itself, you also need to know how spread out that average is, to judge whether your actual resultant looks unusually large next to it. Add up k vectors with random, independent directions and, once k is reasonably large, the real part of the sum and the imaginary part each start looking like an ordinary bell curve centered on zero, courtesy of the central limit theorem, each with variance sum_sq / 2. Square two independent, zero-centered bell curves like that and add them, and what falls out is an exponential distribution with a mean equal to their combined variance, sum_sq. So resultant² itself is approximately exponential with mean sum_sq, under pure chance. An exponential distribution with mean M has a clean tail, the chance of landing at or above some value r is exp(-r/M). Swap in resultant² for r and sum_sq for M and this is exactly
+
+bartels_score = exp(-(resultant²) / sum_sq)
+
+the chance, if there were no real repeating cycle at all, that k unrelated, randomly-angled chunks would happen to line up at least this well anyway.
+
+genuine_pct just flips that number around for a more readable scale.
+
+genuine_pct = (1 - bartels_score) · 100
+
+A bartels_score near 0 means a resultant this large would be almost impossible by pure chance, so genuine_pct sits near 100, strong evidence the cycle is real. A bartels_score near 1 means this resultant is exactly what pure chance produces anyway, so genuine_pct sits near 0, no real evidence either way.
+
+That whole argument needs more than one chunk to mean anything, which is why the function bails out early whenever k < 2. With a single chunk, resultant is just that one phasor's own length, and sum_sq is that same length squared, so bartels_score always comes out to exp(-1), about 0.368, no matter what the underlying data looks like. Feed it three completely different single-chunk inputs and all three give exactly that same number. A test that returns the same answer regardless of the data isn't testing anything, so the function short-circuits and reports 0% genuine instead of running the math.
+
+Worth knowing, this formula is a large-k approximation, and central limit arguments need enough terms before they really kick in. At k = 2, the bare minimum the guard allows, the approximation runs loose, and it leans toward calling noise genuine too often. Feed pure random noise through this test many times at k = 2 and roughly two out of every three trials clear the whitepaper's own 49% genuine bar, even with no cycle in there at all. At k = 10 that drops to a bit over half. By k = 50 it settles in right around 51%, close to where a properly calibrated test aimed at a 49% threshold should land. So this validation step is sharpest when a candidate period repeats many times inside the window, and weakest at the long end of the scan, since a long period can only ever squeeze in a handful of repeats before the data runs out. That's also exactly where scan_periods's max_period rule sits, right at the boundary where this test is at its least reliable.
+
+Two smaller details worth flagging. Chunks get built from the front of the array forward, x(0) to x(P-1), then x(P) to x(2P-1), and so on, so any leftover samples that don't fill a complete chunk sit at the very end and never enter this test. A 613-bar window tested against a 30-bar period gives k = 20, and the last 13 bars, the freshest data available, simply sit out the genuineness check. And period gets rounded to the nearest whole number before any of this runs, since you can't fold data into a chunk of 24.5 samples. Python rounds a clean .5 to the nearest even number rather than always up, so a detected period of exactly 24.5 rounds down to 24, while 25.5 rounds up to 26, a minor quirk but a real one if a candidate ever lands right on a half-bar.
+
+**Back to cycle_scan**
+
+This function sits in the middle of the candidate loop. scan_periods already narrowed the field down to top_candidates, 25 periods by default, ranked by raw amplitude, and nothing weaker than that ever reaches bartels_test at all. For each surviving candidate, fit_sinusoid works out a clean amplitude and a phase anchored to the last bar through an ordinary least-squares fit, separate machinery from anything here, and bartels_test works out how persistent that same period actually looks. Only genuine_pct makes the keep-or-drop call, if genuine < genuine_threshold (49.0 by default, matching the whitepaper's own number) the candidate gets skipped with continue. bartels_score rides along into the output dictionary for reference but doesn't drive anything past that one comparison. What orders the final list is strength_per_bar, amplitude divided by period, Step 4's ranking, not anything out of this validation step. Bartels' job here is strictly in-or-out, not first-or-last.
 
 
+||||||||||||||||
 
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.signal import find_peaks
+SUMMARY
 
-def get_clean_peaks(scan_results, min_distance=3):
-    sorted_scan = sorted(scan_results, key=lambda x: x[0])
-    periods = np.array([x[0] for x in sorted_scan])
-    amplitudes = np.array([x[1] for x in sorted_scan])
-    
-    strengths = amplitudes / periods
-    
-    peak_idx, _ = find_peaks(strengths, distance=min_distance)
-    
-    peaks = []
-    for i in peak_idx:
-        peaks.append({
-            "period": periods[i],
-            "amplitude": amplitudes[i],
-            "strength_per_bar": strengths[i]
-        })
-        
-    peaks.sort(key=lambda c: c["strength_per_bar"], reverse=True)
-    return peaks
+Quick recap of both pieces so far. scan_periods sweeps a range of candidate periods and ranks them by raw strength, using goertzel as its engine underneath. bartels_test then checks which of those candidates actually repeat with a stable phase rather than just looking strong once, turning that check into the genuine_pct score cycle_scan uses to keep or drop each one.
 
-def plot_single_series(y_data, title_text, y_label_text):
-    plt.figure(figsize=(10, 4))
-    plt.plot(y_data, color="black")
-    plt.title(title_text)
-    plt.ylabel(y_label_text)
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+**Step 2, goertzel and scan_periods**
 
-def plot_spectrum(scan_results):
-    sorted_scan = sorted(scan_results, key=lambda x: x[0])
-    periods = [x[0] for x in sorted_scan]
-    strengths = [x[1] / x[0] for x in sorted_scan]
-    
-    plt.figure(figsize=(10, 4))
-    plt.plot(periods, strengths, color="black")
-    plt.title("Cycle Spectrum")
-    plt.xlabel("Period")
-    plt.ylabel("Strength per Bar")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+**The core trick.** Goertzel measures one candidate period's strength and angle using a two-tap recursive filter instead of a full FFT.
+
+s(n) = x(n) + 2cos(ω)·s(n-1) - s(n-2), where ω = 2π / period
+
+cos(ω) and sin(ω) get computed once, no matter how long the data is or how many periods get tested.
+
+**Amplitude and phase.** Built from the filter's last two states.
+
+amplitude = 2·√(Real² + Imag²) / N
+phase = atan2(Imag, Real)
+
+**The correction worth remembering.** The docstring says phase is referenced to the first sample. Working the algebra through, it's actually referenced to the last one, n = N-1. Harmless here since scan_periods never reads this phase, but worth knowing if you call goertzel() on its own.
+
+**Why the numbers aren't exact.** Both formulas lean on a small leftover term shrinking to nothing, the same effect behind spectral leakage in windowed FFTs. It shrinks as more full cycles fit inside the window, so short data and long candidate periods give noisier estimates.
+
+**The sweep itself.** min_period defaults to 8, a floor near the shortest cycle sampled data can represent. max_period defaults to n // 2, since a period needs to repeat at least twice to mean anything. step controls whether fractional periods get tested too, something an FFT's fixed bin grid can't do. The output is a shortlist by raw amplitude, not a verdict, raw amplitude isn't the same as a cycle's real pull per bar.
+
+**Step 3, bartels_test**
+
+**The setup.** The data gets cut into k equal chunks, one candidate cycle long each. Every chunk becomes a phasor, the same single-frequency correlation as Goertzel, computed directly since the period is now a fixed whole number.
+
+resultant = |Σ phasor(j)|
+sum_sq = Σ |phasor(j)|²
+
+**The intuition.** A real, persistent cycle makes every chunk's phasor point roughly the same way, so resultant stays large. Pure noise scatters the phasors and resultant mostly cancels out.
+
+**The genuine score.** sum_sq is exactly what resultant² would average out to under pure chance. By the central limit theorem, resultant² then comes out approximately exponential with that same mean, which gives
+
+bartels_score = exp(-(resultant²) / sum_sq)
+genuine_pct = (1 - bartels_score) · 100
+
+bartels_score behaves like a p-value, the odds of seeing a resultant this large with no real cycle behind it. genuine_pct just flips that into a 0 to 100 reading.
+
+**The degenerate case.** With one chunk, bartels_score is always exactly exp(-1), about 0.368, no matter what the data is. That's why the function refuses to run at all below k = 2.
+
+**The calibration catch, the most important finding.** This formula is a large-k approximation and it runs loose at small k. Pure noise through this test at k = 2, the bare minimum allowed, still clears the whitepaper's 49% genuine bar roughly two times out of three. That drops to a bit over half by k = 10, and only settles near the ideal 51% by k = 50. The test is weakest exactly where scan_periods already flagged things as marginal, long candidate periods that only manage a couple of repeats in the window.
+
+**Two smaller catches.** Leftover samples that don't fill a whole chunk sit unused at the end of the data, even when that's the most recent stretch. And period gets rounded to the nearest whole number first, with Python rounding an exact .5 to the nearest even number rather than always up.
+
+**How it connects in cycle_scan**
+
+Only the top 25 amplitude-ranked candidates from scan_periods ever reach bartels_test. genuine_pct alone decides keep or drop against genuine_threshold, 49.0 by default. bartels_score just rides along in the output for reference. The final order comes from strength_per_bar, amplitude divided by period, Step 4's ranking, not from anything in this validation step.
+
+||||||||||
+
+**Detection** asks whether a series contains a repeating wave of a specific length, and if so, how strong it is and where it currently sits in that cycle. It checks one candidate length at a time rather than scanning every frequency at once, so it can test any length, including ones that fall between whole numbers.
+
+**Validation** then asks whether that detected cycle is real or just a coincidence. It compares the cycle's behavior across several repeats of itself. Consistent alignment from repeat to repeat means it's likely genuine. Scattered, inconsistent alignment means it's likely just noise, and that gets turned into a confidence percentage.
+
+|||||||||||||||
+
+Cycle detection in market data has a long history, and every serious tool in that history is an answer to the same three questions. How much data do you look back on, how do you turn the raw series into a detected cycle, and how do you turn that cycle into a signal. The methods differ mainly in how they trade those three off against each other.
+
+Start with MESA, maximum entropy spectral analysis. The math comes from Burg in 1967, originally for geophysics, and John Ehlers made it the best known cycle tool in trading through his MESA software and books such as "MESA and Trading Market Cycles" and later "Cycle Analytics for Traders". MESA's defining choice is the window. It works on very short lookbacks, typically somewhere around 20 to 50 bars, and its claim to fame is being able to estimate a cycle from barely more than one full repeat of it. It does this by fitting an autoregressive model to the recent data and reading the dominant period off that model's spectrum, rather than measuring the data directly the way a Fourier method does. The detected period then drives adaptive indicators, moving averages and oscillators that stretch or shrink as the measured cycle changes, or Ehlers' sinewave indicator, which fires when the cycle's phase passes certain angles. The strength is responsiveness. A cycle that shifts gets picked up fast because the window is so small. The weakness is the mirror of that strength. With so little data, noise has a big vote. The Meyers study from 2003, the one referenced in the whitepaper, planted known cycles into synthetic data and turned the noise up. MESA's detected periods started to wander, and single true peaks split into false pairs. Once noise power exceeded signal power, MESA stopped finding the planted cycles at all, while the Goertzel sweep still located them correctly.
+
+Wavelets come from a different tradition, signal processing in the 1980s, with the Morlet wavelet the common choice for cycle work. A wavelet transform does not ask what cycles are in the data overall. It asks what cycles were active at each point in time. The lookback is not one fixed number, it scales with the period under test, since judging a long cycle needs a long stretch of data while a short cycle can be judged locally. The output is a two dimensional map, time on one axis, period on the other, brightness showing where each cycle carried energy. That makes wavelets the best tool for a specific job, spotting cycles that appear, persist for a while, then fade, which real market cycles genuinely do. The problem for trading is known as the cone of influence. Estimates near the edges of the data set are distorted because the wavelet runs out of data to correlate against, and the right edge is the newest bar. That is precisely the point where a trader needs the answer, so the tool is weakest exactly where the application demands the most.
+
+The classic Fourier route, the FFT and the periodogram built on it, is the workhorse of the broader spectral literature. It wants long windows, often 256 to 1024 bars in practice, and it quietly assumes the cycle content is stationary, meaning the same cycles at the same strengths run through the entire window. Its two structural limits have both come up earlier in this conversation. The frequency grid is fixed at the data length divided by whole numbers, so long periods land on a very coarse grid and a genuine cycle sitting between two bins gets smeared across both through leakage. And the phase it reports is an average over the whole window, not the phase at the current bar, so projecting the cycle forward from today inherits an averaging error. Within academic finance and business cycle economics, this Fourier tradition connects to the detrending literature, the Hodrick and Prescott filter with its standard lambda of 1600 for quarterly data and 129600 for monthly data, the Cogley and Nason warnings about the HP filter inventing spurious cycles, and Hamilton's 2016 paper arguing to replace the HP filter with a regression approach. Our pipeline's Step 1 sits directly in that literature and inherits both the standard tool and its known criticisms.
+
+The older trading literature frames the whole problem differently and is still worth knowing. Hurst's 1970 book "The Profit Magic of Stock Transaction Timing" established the working assumptions most cycle traders still use. Markets carry several nested cycles at once, short waves riding on longer ones. A cycle should repeat several times inside your observation window before you grant it any trust. And signals come from confluence, moments when several nested cycles bottom or top together, usually read off hand drawn or computed envelope channels around price. On the statistical side, Bartels' 1935 test of significance, adopted by the Foundation for the Study of Cycles as its standard reliability check and applied to financial series by Armstrong in 1973, supplies the discipline, a formal way to ask whether an apparent cycle holds a stable phase from repeat to repeat or is just noise that lined up once. Regarding data conventions, most published trading cycle work runs on daily bars, Ehlers extends to intraday, and the academic business cycle work runs on monthly or quarterly series, which is why its filter parameters need adjusting before touching daily price data.
+
+Against that backdrop, the whitepaper pipeline is a deliberate set of picks from each tradition. The lookback rule is a full cycle spectrum sweep with the longest testable period capped at half the data, meaning every candidate must repeat at least twice, the loosest version of Hurst's repetition rule. The detection engine is Goertzel rather than FFT because it can test any period at all, including fractional ones, with no bin grid, and because the Meyers evidence shows it degrades most gracefully as noise grows, the realistic condition in modern markets. The phase is deliberately taken at the last bar rather than averaged, fixing the FFT tradition's projection problem. The validation step is Bartels, the FSC's own historical standard, filtering the amplitude ranked candidates down to ones with persistent phase. And the signal is the surviving dominant cycle, ranked by strength per bar rather than raw amplitude, projected forward past the right edge of the chart, with turns in that projection acting as the trade timing.
+
+Each rival tradition also points at a concrete upgrade this pipeline could absorb. Running the whole scan on a rolling window would recover the one thing wavelets do best, showing whether the dominant period is stable or drifting through time, without importing the edge distortion problem since each scan's answer is still anchored to its own last bar. Tracking the top few validated cycles together and summing their forward projections would implement Hurst's nested cycle view instead of betting everything on one wave. Raising the validation floor to three or more full repeats would firm up the Bartels test exactly where the earlier calibration check showed it runs loose. And swapping the HP filter for Hamilton's regression detrend would answer the strongest academic objection to the preprocessing step while leaving detection, validation, and ranking untouched.
+
+**Summary**
+
+Every cycle tool balances window length against reliability. MESA uses tiny windows and pays for it in noise sensitivity. Wavelets track cycles through time but blur at the newest bar. FFT is fast and standard but locked to a coarse period grid and an averaged phase. The whitepaper pipeline combines a Goertzel sweep, which tests any period and holds up best under heavy noise per Meyers 2003, with last bar phase extraction and Bartels validation, the FSC's own historical significance test, then ranks survivors by influence per bar rather than raw amplitude.
+
+**Key points**
+
+- MESA, lookback around 20 to 50 bars, autoregressive model, fast but unstable once noise exceeds signal.
+- Wavelets, window scales with the period tested, maps cycles through time, unreliable at the last bar where trading decisions happen.
+- FFT, long windows of 256 bars or more, fixed period grid, averaged phase, assumes cycles stay constant through the window.
+- Our pipeline, minimum two repeats per candidate period, any period testable including fractional, phase read at the last bar, Bartels filter against random hits.
+- Literature anchors, Hurst 1970 for nested cycles and repetition rules, Bartels 1935 and Armstrong 1973 for validation, Ehlers for MESA and adaptive indicators, Meyers 2003 for the noise comparison, Hodrick Prescott and Hamilton 2016 for detrending.
+- Realistic upgrades, rolling window scans, tracking several cycles at once, requiring three or more repeats, Hamilton's detrend in place of the HP filter.
+
 
