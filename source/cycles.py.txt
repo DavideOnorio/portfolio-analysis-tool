@@ -1,3 +1,24 @@
+def choose_cutoff(max_scan_period, retain_frac=0.8):
+    target_trend_gain = 1.0 - retain_frac
+    omega_p = 2*np.pi/max_scan_period
+    ratio = np.sqrt(target_trend_gain/(1.0-target_trend_gain))
+    val = np.clip(1.0 - (1.0-np.cos(omega_p))*ratio, -1.0, 1.0)
+    omega_cutoff = np.arccos(val)
+    return 2*np.pi/omega_cutoff
+
+cutoff = choose_cutoff(max_scan_period=350, retain_frac=0.8)
+lam = lambda_from_cutoff(cutoff)
+
+def lambda_from_cutoff(cutoff_period):
+    omega = 2.0 * np.pi / cutoff_period
+    return 1.0 / (4.0 * (1.0 - np.cos(omega)) ** 2)
+
+lam = lambda_from_cutoff(250)  # anything longer than 250 bars counts as trend
+trend, cycle = hp_filter(df.values, lam=lam)
+
+
+
+
 # From the Formula to the Matrix, Step by Step
 
 ## The two things we are balancing
