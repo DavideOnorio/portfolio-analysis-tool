@@ -25,6 +25,15 @@ trend, cycle = hp_filter(df.values, lam=lam)
 
 We want a trend τ (tau) that stays close to the data y, and that bends as little as possible. Written as a single number to minimize, that is
 
+
+
+	•	Built a model end to end — went through the whole pipeline from raw idea to working output
+	•	Learned how to structure and test a model so it actually holds up, not just runs once
+	•	Picked up real knowledge on financial markets from a sharp, experienced quant team
+	•	Got a much better sense of how markets actually move day to day, not just textbook theory
+	•	Learned how to ask better questions and take feedback fast in a fast-paced team
+	•	Improved at explaining technical work clearly to people outside the technical side
+
 ```
 S(τ) = Σ_{t=1}^{n} (y_t − τ_t)²   +   λ Σ_{t=2}^{n−1} (τ_{t−1} − 2τ_t + τ_{t+1})²
 ```
