@@ -1,3 +1,9 @@
+Old phones use something called DTMF. Every button on the keypad makes two tones at once, mixed together into one sound. The phone doesn’t hear “button 5,” it just hears a mixed noise, and it has to figure out which two tones are hiding inside it.
+
+A price chart works the same way. It’s not one clean line, it’s a few waves mixed together, plus noise, just like the phone’s mixed tone.
+
+So we do what the phone does with DTMF. We check for one tone, one wave size, at a time. “Is this one in here?” Then we try the next size, and the next, until the real ones start standing out from the noise, the same way the phone picks the two real tones out of the mix
+
 def choose_cutoff(max_scan_period, retain_frac=0.8):
     target_trend_gain = 1.0 - retain_frac
     omega_p = 2*np.pi/max_scan_period
