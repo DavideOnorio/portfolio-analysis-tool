@@ -5,6 +5,10 @@ def choose_cutoff(max_scan_period, retain_frac=0.8):
     val = np.clip(1.0 - (1.0-np.cos(omega_p))*ratio, -1.0, 1.0)
     omega_cutoff = np.arccos(val)
     return 2*np.pi/omega_cutoff
+	•	Reading QTOW every Monday gave me a sense of how the team reads market moves week to week, and what signals actually matter. It showed me how they turn a market move into a trade idea worth writing up.
+	•	Building my own model taught me how to start from raw data, turn it into a signal, then backtest and validate it. It showed me how to take a model from point A to point B, and how to approach the work like real research, step by step, not just guessing.
+	•	Looking at the internal model taught me how to do things properly. It showed me how to structure a project the right way, how to organize code and logic so it makes sense, and how to build something that holds up, not just something that works once.
+
 
 
 
