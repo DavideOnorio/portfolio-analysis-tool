@@ -6,6 +6,12 @@ def choose_cutoff(max_scan_period, retain_frac=0.8):
     omega_cutoff = np.arccos(val)
     return 2*np.pi/omega_cutoff
 
+
+
+	•	The steep learning curve. There was always something new to learn, and every topic went deep, not just on the surface.
+	•	The energy at the office. The team is young and full of life. People were always ready to stop and explain things, even simple questions.
+
+
 cutoff = choose_cutoff(max_scan_period=350, retain_frac=0.8)
 lam = lambda_from_cutoff(cutoff)
 
